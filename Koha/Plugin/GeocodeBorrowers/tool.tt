@@ -1,0 +1,61 @@
+[% INCLUDE 'doc-head-open.inc' %]
+<title>Koha: Geocoding Sync</title>
+[% INCLUDE 'doc-head-close.inc' %]
+[% INCLUDE 'header.inc' %]
+[% INCLUDE 'cat-search.inc' %]
+
+<div id='breadcrumbs'>
+    <a href='/cgi-bin/koha/mainpage.pl'>Home</a> &rsaquo;
+    <a href='/cgi-bin/koha/plugins/plugins-home.pl'>Plugins</a> &rsaquo;
+    Geocoding Sync
+</div>
+
+<div id='doc3' class='mainDiv' style='height:90%; display:flex;'>
+    <div id='content' style='flex-grow:1; background:white; display:flex; flex-direction:column;
+         align-items:center; padding: 2em; overflow:auto;' class='marginBottom'>
+
+        <h2>Run Geocoding Sync</h2>
+
+        [% IF result_message %]
+            <div role="status" style="margin-bottom:1.5em; padding: 1em; border-radius:4px;
+                 background:#f0fff0; border:1px solid #59C134; color:#2d6a2d; font-weight:bold; max-width:500px;">
+                [% result_message | html %]
+            </div>
+            <p><a href='/cgi-bin/koha/plugins/plugins-home.pl'>Back to Plugins</a></p>
+        [% ELSE %]
+            <p style='max-width:500px;'>
+                This will geocode all patrons whose addresses have changed since the last sync.
+                Depending on the number of patrons this may take some time and will consume
+                Google Maps API quota.
+            </p>
+
+            <form method='post'>
+                [% INCLUDE 'csrf-token.inc' %]
+                <input type='hidden' name='class'    value='[% CLASS  | html %]'/>
+                <input type='hidden' name='method'   value='[% METHOD | html %]'/>
+                <input type='hidden' name='run_sync' value='1'/>
+
+                <fieldset style='border:none; margin-top:1em; display:flex; gap:1em;'>
+                    <input type='submit' value='Run Sync Now'
+                        style='color:white; border:none; background-color:#59C134;
+                               padding:10px 20px; border-radius:5px; cursor:pointer;'
+                        class='input'/>
+                    <a href='/cgi-bin/koha/plugins/plugins-home.pl'
+                        style='padding:10px 20px; border-radius:5px; border:1px solid #ccc;
+                               text-decoration:none; color:#333; background:#f5f5f5;'>Cancel</a>
+                </fieldset>
+            </form>
+        [% END %]
+
+    </div>
+</div>
+
+<style>
+    .mainDiv { flex-direction: column; background: white; }
+    @media (min-width: 1200px) {
+        .mainDiv { flex-direction: row; background: #ECECEC; margin: 0 auto; max-width: fit-content; }
+    }
+    html, body { height: 100%; }
+</style>
+
+[% INCLUDE 'intranet-bottom.inc' %]
