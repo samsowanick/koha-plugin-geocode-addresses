@@ -37,42 +37,43 @@
                 <input type='hidden' name='class'  value='[% CLASS  | html %]'/>
                 <input type='hidden' name='method' value='[% METHOD | html %]'/>
 
-                <fieldset style="display: inline-grid; gap: 1em; justify-items: center; width: 400px;">
-                    <legend style="font-weight: bold; font-size: 1.2em;">API Settings</legend>
+                <fieldset style="display: inline-grid; gap: 1em; justify-items: center; width: 480px;">
+                    <legend style="font-weight: bold; font-size: 1.2em;">Nominatim Settings</legend>
 
                     <div style="display: flex; flex-direction: column; gap: 0.5em; width: 100%;">
-                        <label for="google_api_key">Google Maps API Key:</label>
-
-                        <div style="display: flex; gap: 0.5em; align-items: center;">
-                            <input
-                                name="google_api_key"
-                                id="google_api_key"
-                                type="password"
-                                value="[% google_api_key | html %]"
-                                autocomplete="off"
-                                style="flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px;"
-                            />
-                            <button
-                                type="button"
-                                id="toggle_key"
-                                onclick="
-                                    var f = document.getElementById('google_api_key');
-                                    var b = document.getElementById('toggle_key');
-                                    if (f.type === 'password') {
-                                        f.type = 'text';
-                                        b.textContent = 'Hide';
-                                    } else {
-                                        f.type = 'password';
-                                        b.textContent = 'Show';
-                                    }
-                                "
-                                style="padding: 8px 12px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: #f5f5f5;"
-                            >Show</button>
-                        </div>
+                        <label for="nominatim_url">Custom Nominatim URL <em>(optional)</em>:</label>
+                        <input
+                            name="nominatim_url"
+                            id="nominatim_url"
+                            type="url"
+                            value="[% nominatim_url | html %]"
+                            placeholder="https://nominatim.openstreetmap.org/search"
+                            autocomplete="off"
+                            style="flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px;"
+                        />
                         <small style="color: #696969;">
-                            Your Google Maps Geocoding API key. Keep this private —
-                            it is tied to your billing account.
+                            Leave blank to use the public
+                            <a href="https://nominatim.openstreetmap.org/" target="_blank">nominatim.openstreetmap.org</a>
+                            endpoint. If your library runs its own Nominatim instance, enter its
+                            <code>/search</code> URL here.
                         </small>
+                    </div>
+
+                    <div style="background: #fff8dc; border: 1px solid #e6c84a; border-radius: 4px; padding: 0.75em 1em; width: 100%; box-sizing: border-box;">
+                        <strong>Nominatim Usage Policy</strong><br>
+                        This plugin uses the
+                        <a href="https://nominatim.openstreetmap.org/" target="_blank">Nominatim</a>
+                        geocoding service, powered by
+                        <a href="https://www.openstreetmap.org/" target="_blank">OpenStreetMap</a>
+                        data and provided free of charge by the
+                        <a href="https://osmfoundation.org/" target="_blank">OpenStreetMap Foundation</a>.
+                        The plugin complies with the
+                        <a href="https://operations.osmfoundation.org/policies/nominatim/" target="_blank">Nominatim usage policy</a>
+                        by caching all results, limiting requests to 1&nbsp;per&nbsp;second, and
+                        sending a descriptive User-Agent. Data is provided under the
+                        <a href="https://opendatacommons.org/licenses/odbl/" target="_blank">ODbL license</a>.
+                        If you geocode large numbers of patrons regularly, please consider
+                        <a href="https://nominatim.org/release-docs/latest/admin/Installation/" target="_blank">hosting your own Nominatim instance</a>.
                     </div>
                 </fieldset>
 
