@@ -24,9 +24,17 @@
             <p><a href='/cgi-bin/koha/plugins/plugins-home.pl'>Back to Plugins</a></p>
         [% ELSE %]
             <p style='max-width:500px;'>
-                This will geocode all patrons whose addresses have changed since the last sync.
-                Depending on the number of patrons this may take some time and will consume
-                Google Maps API quota.
+                This will geocode up to <strong>50 patrons</strong> whose addresses have changed
+                since the last sync, using the
+                <a href="https://nominatim.openstreetmap.org/" target="_blank">Nominatim</a>
+                geocoding service (OpenStreetMap data, ODbL license).
+            </p>
+            <p style='max-width:500px;'>
+                Requests are throttled to <strong>1&nbsp;per&nbsp;second</strong> per the
+                <a href="https://operations.osmfoundation.org/policies/nominatim/" target="_blank">Nominatim usage policy</a>,
+                so this button may take up to ~50 seconds to complete. If more patrons remain
+                after this run, the result message will tell you — click again or let the
+                nightly job finish the rest.
             </p>
 
             <form method='post'>
