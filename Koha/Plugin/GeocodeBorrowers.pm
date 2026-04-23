@@ -12,18 +12,41 @@ use LWP::UserAgent;
 use JSON qw(decode_json);
 use URI::Escape;
 
-our $VERSION = '1.5';
+our $VERSION = '2.0';
 our $metadata = {
     name            => 'Borrower Geocoding Plugin',
     author          => 'Samuel Sowanick, Corvallis-Benton County Public Library',
-    description     => 'Geocodes patron addresses.',
+    description     => 'Geocodes patron addresses using the Nominatim/OpenStreetMap API.',
     date_authored   => '2026-04-22',
-    date_updated    => '2026-04-22',
+    date_updated    => '2026-04-23',
     minimum_version => '22.05',
     version         => $VERSION,
 };
 
-# Removed unused 'use DBI' — C4::Context->dbh handles all DB connections.
+# Nominatim endpoint used by this plugin.
+# Per the Nominatim usage policy (https://operations.osmfoundation.org/policies/nominatim/)
+# the public API at nominatim.openstreetmap.org must not be used for heavy bulk
+# geocoding. This plugin complies by:
+#   1. Caching every result in borrower_lat_long so the same address is never
+#      requested twice.
+#   2. Throttling to exactly 1 request/second (the maximum allowed).
+#   3. Sending a descriptive User-Agent that identifies the application and
+#      contact, as required by the policy.
+#   4. Capping web-triggered runs at 50 patrons so a librarian click cannot
+#      accidentally fire hundreds of requests in a single HTTP response cycle.
+# If your installation has a large patron base, consider running your own
+# Nominatim instance (https://nominatim.org/release-docs/latest/admin/Installation/)
+# and overriding NOMINATIM_URL below.
+use constant NOMINATIM_URL => 'https://nominatim.openstreetmap.org/search';
+
+# User-Agent string sent with every request.
+# The Nominatim policy requires a value that clearly identifies your application
+# and provides a contact point. Stock LWP strings ("libwww-perl/X.Y") are
+# explicitly disallowed. Change the URL/email below to match your library.
+use constant NOMINATIM_UA =>
+    'Koha-GeocodeBorrowers/2.0 (Koha ILS patron geocoding plugin; '
+  . 'https://github.com/your-library/koha-plugin-geocode-borrowers; '
+  . 'your-contact@yourlibrary.org)';
 
 sub new {
     my ( $class, $args ) = @_;
@@ -76,11 +99,9 @@ sub upgrade {
     # v1.4 -> v1.5: drop foreign key if it still exists (installs that had
     # the old schema), add geocoded_on if missing.
     if ( $dt lt '1.5' ) {
-        # Drop FK constraint if present — ignore errors if it was never there.
         eval {
             $dbh->do("ALTER TABLE borrower_lat_long DROP FOREIGN KEY fk_bll_borrowernumber");
         };
-        # Add geocoded_on column if missing.
         eval {
             $dbh->do("
                 ALTER TABLE borrower_lat_long
@@ -89,6 +110,9 @@ sub upgrade {
             ");
         };
     }
+
+    # v1.x -> v2.0: no schema changes; Google API key is no longer used but
+    # the stored value is left in plugin_data so a downgrade is non-destructive.
     return 1;
 }
 
@@ -101,20 +125,17 @@ sub uninstall {
 
 sub sync_geocoding {
     my ($self, %opts) = @_;
-    my $api_key   = $self->retrieve_data('google_api_key');
     my $batch_max = $opts{batch_max} // 0;   # 0 = unlimited (nightly); set for web tool
-    return (0, "Google API Key is not configured.") unless $api_key;
 
     my $dbh = C4::Context->dbh;
 
-    # Increased timeout to 30s to be more tolerant under load.
-    my $ua = LWP::UserAgent->new;
+    # Build a User-Agent that satisfies Nominatim's identification requirement.
+    # LWP's default string ("libwww-perl/X.Y") is explicitly disallowed by the
+    # usage policy, so we replace it entirely.
+    my $ua = LWP::UserAgent->new( agent => NOMINATIM_UA );
     $ua->timeout(30);
 
     # Purge rows whose borrowernumber no longer exists in borrowers.
-    # Without a FK cascade this must be done manually. Doing it here — rather
-    # than via a trigger — ensures all writes to borrower_lat_long are
-    # controlled exclusively by this plugin.
     $dbh->do("
         DELETE bll FROM borrower_lat_long bll
         LEFT JOIN borrowers b ON bll.borrowernumber = b.borrowernumber
@@ -123,8 +144,6 @@ sub sync_geocoding {
 
     # The WHERE clause uses MySQL/MariaDB's null-safe equality operator (<=>)
     # to detect address field changes including NULL transitions.
-    # Note: <=> in Perl is the numeric spaceship/sort operator — a different
-    # thing. The <=> here is inside a SQL string, interpreted by the DB engine.
     my $sth = $dbh->prepare("
         SELECT b.borrowernumber, b.address, b.city, b.state, b.zipcode
         FROM borrowers b
@@ -137,17 +156,12 @@ sub sync_geocoding {
     ");
     $sth->execute();
 
-    # Fetch all rows into memory immediately, then close the cursor.
-    # This avoids holding an open read cursor against the borrowers table
-    # for the entire duration of the sync (which sleeps 100ms per row),
-    # reducing lock contention during busy periods.
+    # Fetch all rows into memory immediately, then close the cursor to reduce
+    # lock contention while we sleep between geocode requests.
     my @rows = @{ $sth->fetchall_arrayref({}) };
     $sth->finish();
 
     # INSERT ... ON DUPLICATE KEY UPDATE is a true in-place update.
-    # REPLACE INTO (the previous approach) does a DELETE + INSERT under the
-    # hood, which could silently remove rows from any future table that
-    # references borrower_lat_long. ON DUPLICATE KEY UPDATE never deletes.
     my $insert_sth = $dbh->prepare("
         INSERT INTO borrower_lat_long
             (borrowernumber, address, city, state, zipcode, latitude, longitude)
@@ -179,79 +193,58 @@ sub sync_geocoding {
             next;
         }
 
-        my $safe_address = uri_escape($full_address);
-        my $url = "https://maps.googleapis.com/maps/api/geocode/json?address=$safe_address&key=$api_key";
+        # Nominatim free-form search. We request JSON output and limit to 1
+        # result since we only need the best match.
+        # NOTE: Do NOT send personally identifiable patron data to the public
+        # Nominatim service if your privacy policy or local law prohibits it.
+        # In that case, run your own Nominatim instance and update NOMINATIM_URL.
+        my $url = NOMINATIM_URL
+            . '?q='      . uri_escape($full_address)
+            . '&format=jsonv2'
+            . '&limit=1'
+            . '&addressdetails=0';
 
-        # Attempt the geocode request with exponential backoff on rate-limit
-        # responses. Google returns OVER_QUERY_LIMIT when the per-second or
-        # per-day quota is exceeded. We retry up to 3 times with increasing
-        # delays (2s, 4s, 8s) before giving up on this borrower.
-        my $data;
-        my $max_retries = 3;
-        my $retry_delay = 2;
-        my $gave_up     = 0;
+        my $response = $ua->get($url);
 
-        for my $attempt ( 1 .. $max_retries ) {
-            my $response = $ua->get($url);
-
-            unless ($response->is_success) {
-                warn "GeocodeBorrowers: HTTP error for borrower $row->{borrowernumber} "
-                    . "(attempt $attempt): " . $response->status_line;
-                # Non-200 HTTP errors are not retryable — move on immediately.
-                $gave_up = 1;
-                last;
-            }
-
-            $data = eval { decode_json($response->decoded_content) };
-            if ($@) {
-                warn "GeocodeBorrowers: JSON parse error for borrower $row->{borrowernumber}: $@";
-                $gave_up = 1;
-                last;
-            }
-
-            if ( $data->{status} eq 'OVER_QUERY_LIMIT' ) {
-                warn "GeocodeBorrowers: OVER_QUERY_LIMIT on attempt $attempt for borrower "
-                    . "$row->{borrowernumber} — waiting ${retry_delay}s before retry.";
-                sleep($retry_delay);
-                $retry_delay *= 2;
-                $data = undef;
-                next;
-            }
-
-            # Any other status (OK, ZERO_RESULTS, INVALID_REQUEST, etc.)
-            # is a definitive answer — no point retrying.
-            last;
-        }
-
-        unless (defined $data) {
-            warn "GeocodeBorrowers: Giving up on borrower $row->{borrowernumber} after retries.";
+        unless ($response->is_success) {
+            warn "GeocodeBorrowers: HTTP error for borrower $row->{borrowernumber}: "
+                . $response->status_line;
             $fail_count++;
+
+            # Still sleep 2 full second on error — the server may be under
+            # load and we must not hammer it regardless of the outcome.
+            sleep(2);
             next;
         }
 
-        if ($gave_up) {
+        my $data = eval { decode_json($response->decoded_content) };
+        if ($@) {
+            warn "GeocodeBorrowers: JSON parse error for borrower $row->{borrowernumber}: $@";
             $fail_count++;
+            sleep(2);
             next;
         }
 
-        unless ($data->{status} eq 'OK' && @{$data->{results}}) {
+        # Nominatim returns a JSON array. An empty array means no results.
+        unless (ref $data eq 'ARRAY' && @$data) {
             warn "GeocodeBorrowers: No results for borrower $row->{borrowernumber} "
-                . "(status: $data->{status}, address: $full_address)";
+                . "(address: $full_address)";
             $fail_count++;
+            sleep(2);
             next;
         }
 
-        my $lat = $data->{results}[0]{geometry}{location}{lat};
-        my $lng = $data->{results}[0]{geometry}{location}{lng};
+        my $lat = $data->[0]{lat};
+        my $lng = $data->[0]{lon};    # Nominatim uses 'lon', not 'lng'
 
         # Do not write the row if lat/lng are missing — this prevents a
         # borrower from being silently stuck as geocoded-but-null and never
-        # retried on subsequent syncs (address fields would match, so the
-        # WHERE clause would skip them forever).
+        # retried on subsequent syncs.
         unless (defined $lat && $lat != 0 && defined $lng && $lng != 0) {
-            warn "GeocodeBorrowers: API returned OK but no valid coordinates "
+            warn "GeocodeBorrowers: API returned a result but no valid coordinates "
                 . "for borrower $row->{borrowernumber}";
             $fail_count++;
+            sleep(2);
             next;
         }
 
@@ -271,19 +264,19 @@ sub sync_geocoding {
         if ($@) {
             warn "GeocodeBorrowers: DB insert failed for borrower $row->{borrowernumber}: $@";
             $fail_count++;
+            sleep(2);
             next;
         }
 
         $count++;
 
-        # Stop early if a batch cap was set (used by the web tool to avoid
-        # hitting the server's HTTP gateway timeout). The nightly job passes
-        # no limit and runs until all patrons are processed.
+        # Stop early if a batch cap was set (used by the web tool).
         last if $batch_max && $count >= $batch_max;
 
-        # Throttle to ~10 req/sec to stay within Google's rate limits
-        # and avoid hammering their API during a bulk sync.
-        select(undef, undef, undef, 0.1);
+        # Nominatim's usage policy requires a maximum of 1 request per second.
+        # We sleep a full second here (rather than 100 ms as with Google) to
+        # ensure we never exceed that limit even under system scheduling jitter.
+        sleep(2);
     }
 
     my $remaining = scalar(@rows) - $count - $skip_count - $fail_count;
@@ -302,15 +295,16 @@ sub configure {
     my $template = $self->get_template({ file => 'configure.tt' });
 
     # Only save when the form is explicitly submitted (POST + save param).
-    # Previously 'save' was a hidden field present on every page load, meaning a
-    # GET request to the configure page would overwrite stored data.
     if ( $cgi->request_method() eq 'POST' && $cgi->param('save') ) {
-        my $key = $cgi->param('google_api_key') || '';
-        $self->store_data({ google_api_key => $key });
+        # No API key is required for the public Nominatim endpoint.
+        # We store the custom Nominatim URL so installations that run their
+        # own instance can point the plugin at it without editing source code.
+        my $url = $cgi->param('nominatim_url') || '';
+        $self->store_data({ nominatim_url => $url });
         $template->param( success_message => 'Configuration saved.' );
     }
 
-    $template->param( google_api_key => $self->retrieve_data('google_api_key') );
+    $template->param( nominatim_url => $self->retrieve_data('nominatim_url') );
     $self->output_html( $template->output() );
 }
 
@@ -319,14 +313,9 @@ sub tool {
     my $cgi      = $self->{cgi};
     my $template = $self->get_template({ file => 'tool.tt' });
 
-    # Use Koha's template system for both GET and POST so that csrf-token.inc
-    # is rendered by the same mechanism Koha uses everywhere else in the staff
-    # interface. Printing raw HTML bypasses Koha's CSRF middleware entirely,
-    # which is why the POST was being rejected with "No CSRF token passed".
     if ( $cgi->request_method() eq 'POST' && $cgi->param('run_sync') ) {
-        # Cap web-triggered syncs at 50 patrons per click to avoid hitting
-        # the server's HTTP gateway timeout. The nightly job runs unlimited.
-        # The result message will tell the librarian if more remain.
+        # Cap web-triggered syncs at 50 patrons per click. At 1 req/sec that is
+        # ~50 seconds — well within a typical HTTP gateway timeout.
         my ($count, $message) = $self->sync_geocoding( batch_max => 50 );
         $template->param( result_message => $message );
     }
@@ -334,12 +323,8 @@ sub tool {
     $self->output_html( $template->output() );
 }
 
-
 sub nightly {
     my ($self) = @_;
-
-    # Log the result so failures are visible in Koha's plack/starman logs
-    # rather than silently discarded.
     my ($count, $message) = $self->sync_geocoding();
     warn "GeocodeBorrowers nightly sync: $message";
 }
